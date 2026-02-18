@@ -7,62 +7,65 @@ from datetime import datetime
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="BioTwin: Growth Chamber Digital Twin",
-    page_icon="🌱",
+    page_icon="🧬",
     layout="wide"
 )
 
-# --- STYLING ---
-st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #f0f2f6;
-        border-radius: 10px;
-        padding: 20px;
-        border: 1px solid #e6e9ef;
-    }
-    .status-good { color: #28a745; font-weight: bold; }
-    .status-warn { color: #ffc107; font-weight: bold; }
-    .status-danger { color: #dc3545; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
-
 # --- SESSION STATE INITIALIZATION ---
-# We use session state to persist historical data across streamlit's experimental reruns
 if 'history' not in st.session_state:
     st.session_state.history = pd.DataFrame(columns=[
-        'Timestamp', 'Temperature', 'pH', 'Humidity', 'CO2', 'HealthScore'
+        'Timestamp', 'Temperature', 'pH', 'Humidity', 'CO2', 'HealthScore', 'Biomass'
     ])
+if 'current_volume_ml' not in st.session_state:
+    st.session_state.current_volume_ml = 100.0 # Starting at 100ml
 
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("🕹️ Chamber Controls")
-st.sidebar.markdown("Adjust target parameters for the environment.")
-
 target_temp = st.sidebar.slider("Target Temperature (°C)", 15.0, 45.0, 25.0, step=0.5)
 mixer_speed = st.sidebar.slider("Mixer Speed (RPM)", 0, 1000, 300)
 
 st.sidebar.divider()
-st.sidebar.info("""
-**Digital Twin Logic:**
-The simulation uses a stochastic process (Gaussian noise) around your target values to simulate real sensor drift.
-""")
+st.sidebar.header("🧫 Cultivation Settings")
+init_vol = st.sidebar.number_input("Initial Inoculum (ml)", value=100)
+target_vol_l = st.sidebar.number_input("Target Harvest (Liters)", value=5.0)
+growth_speed = st.sidebar.select_slider("Growth Multiplier", options=["Slow", "Standard", "Fast"], value="Standard")
+
+# Reset Button
+if st.sidebar.button("Reset Cultivation"):
+    st.session_state.current_volume_ml = float(init_vol)
+    st.session_state.history = pd.DataFrame(columns=['Timestamp', 'Temperature', 'pH', 'Humidity', 'CO2', 'HealthScore', 'Biomass'])
+    st.rerun()
+
+# --- BIOMASS LOGIC ---
+def calculate_growth(current_ml, health_score, speed_setting):
+    # Mapping growth speed to a base multiplier
+    speed_map = {"Slow": 0.001, "Standard": 0.005, "Fast": 0.015}
+    base_rate = speed_map[speed_setting]
+    
+    # Growth is dependent on health score (0.0 to 1.0 multiplier)
+    # If health < 50, growth stalls or declines slightly
+    health_factor = (health_score - 40) / 60 
+    health_factor = max(-0.01, health_factor) # Can have slight decay if very unhealthy
+    
+    # Exponential growth formula: N(t) = N0 * e^(rt)
+    # Simplified for 1-second ticks:
+    new_volume = current_ml * (1 + (base_rate * health_factor))
+    return max(0, new_volume)
 
 # --- SIMULATION ENGINE ---
-def generate_data(target_t):
-    # Base values with realistic biological fluctuations using numpy
+def generate_data(target_t, current_vol):
     temp = target_t + np.random.normal(0, 0.2)
     ph = 7.0 + np.random.normal(0, 0.05)
     humidity = 60.0 + np.random.normal(0, 1.5)
     co2 = 400.0 + np.random.normal(0, 10.0)
     
-    # AI Predictive Analysis: Growth Health Score Calculation
-    # Logic: Ideal temp is 22-28°C. Score drops as temp deviates.
+    # AI Predictive Health Score
     score = 100.0
     if temp > 32.0:
-        score -= (temp - 32.0) * 15 # Heavy penalty for heat stress
+        score -= (temp - 32.0) * 15 
     elif temp < 18.0:
         score -= (18.0 - temp) * 5
-        
-    score = max(0, min(100, score)) # Clip between 0-100
+    score = max(0, min(100, score))
     
     return {
         'Timestamp': datetime.now().strftime("%H:%M:%S"),
@@ -70,61 +73,82 @@ def generate_data(target_t):
         'pH': round(ph, 2),
         'Humidity': round(humidity, 1),
         'CO2': round(co2, 0),
-        'HealthScore': round(score, 1)
+        'HealthScore': round(score, 1),
+        'Biomass': round(current_vol / 1000, 3) # Convert to Liters for the chart
     }
 
-# --- MAIN DASHBOARD UI ---
-st.title("🌱 BioTwin: Growth Chamber Digital Twin")
-st.markdown(f"**Status:** Synchronized with virtual sensors | **Mixer:** {mixer_speed} RPM")
+# --- MAIN UI ---
+st.title("🌱 BioTwin: Digital Twin & Cultivation Manager")
 
-# Placeholders for real-time updates
+# Top Level Progress Bar
+target_ml = target_vol_l * 1000
+progress_pct = min(1.0, st.session_state.current_volume_ml / target_ml)
+
+st.subheader(f"Total Progress: {round(progress_pct * 100, 1)}%")
+st.progress(progress_pct)
+
+# Metrics and UI segments
 metrics_placeholder = st.empty()
-chart_placeholder = st.empty()
 ai_analysis_placeholder = st.empty()
+chart_placeholder = st.empty()
 
 # --- REAL-TIME LOOP ---
-# In a production app, we might use a fragment or a separate thread, 
-# but for a Digital Twin sim, a simple loop with st.empty works best.
 while True:
-    # 1. Generate new data point
-    new_data = generate_data(target_temp)
+    # 1. Logic Update
+    new_data = generate_data(target_temp, st.session_state.current_volume_ml)
     
-    # 2. Update History (keep last 50 data points for performance)
+    # Update biomass based on current health
+    st.session_state.current_volume_ml = calculate_growth(
+        st.session_state.current_volume_ml, 
+        new_data['HealthScore'], 
+        growth_speed
+    )
+    
+    # 2. History Management
     new_row = pd.DataFrame([new_data])
     st.session_state.history = pd.concat([st.session_state.history, new_row], ignore_index=True).tail(50)
     
     # 3. Render Metrics
     with metrics_placeholder.container():
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Temperature", f"{new_data['Temperature']}°C", delta=f"{round(new_data['Temperature']-target_temp, 2)}°C")
-        col2.metric("pH Level", f"{new_data['pH']}", delta="Optimal")
-        col3.metric("Humidity", f"{new_data['Humidity']}%", delta="±1.2%")
-        col4.metric("CO2 Concentration", f"{new_data['CO2']} ppm")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Biomass (Liters)", f"{new_data['Biomass']} L", delta=f"{round(st.session_state.current_volume_ml - (new_data['Biomass']*1000), 2)} ml/s")
+        m2.metric("Temp", f"{new_data['Temperature']}°C")
+        m3.metric("pH", f"{new_data['pH']}")
+        m4.metric("CO2", f"{new_data['CO2']} ppm")
 
-    # 4. Render AI Analysis & Warnings
+    # 4. Render AI Status
     with ai_analysis_placeholder.container():
-        st.subheader("🧠 AI Predictive Analysis")
         h_score = new_data['HealthScore']
+        col_a, col_b = st.columns([1, 3])
         
-        # UI Logic for Health Score
-        if h_score > 80:
-            st.success(f"**Growth Health Score: {h_score}/100** - Environment is Optimal.")
-        elif 50 <= h_score <= 80:
-            st.warning(f"**Growth Health Score: {h_score}/100** - Warning: Temperature variance detected.")
-        else:
-            st.error(f"**Growth Health Score: {h_score}/100** - CRITICAL: Heat stress detected in biological specimen!")
-            st.toast("⚠️ Critical Alert: High Temperature Stress!", icon="🔥")
+        with col_a:
+            st.write("**Growth Status:**")
+            if h_score > 80:
+                st.success("OPTIMAL")
+            elif h_score > 50:
+                st.warning("STRESSED")
+            else:
+                st.error("STAGNANT")
+        
+        with col_b:
+            if h_score < 50:
+                st.error(f"Critical Heat Warning! Growth has halted. Current Score: {h_score}")
+            else:
+                st.info(f"Microbial doubling is active at {growth_speed} rate.")
 
-    # 5. Render Visuals
+    # 5. Render Charts
     with chart_placeholder.container():
-        # Displaying two main charts
         c1, c2 = st.columns(2)
         with c1:
-            st.write("Temperature History")
-            st.line_chart(st.session_state.history.set_index('Timestamp')[['Temperature']])
+            st.write("Biomass Accumulation (L)")
+            st.line_chart(st.session_state.history.set_index('Timestamp')[['Biomass']])
         with c2:
-            st.write("Health Score Trend")
-            st.line_chart(st.session_state.history.set_index('Timestamp')[['HealthScore']])
+            st.write("Environment Stability")
+            st.line_chart(st.session_state.history.set_index('Timestamp')[['Temperature', 'HealthScore']])
 
-    # 6. Frequency control
-    time.sleep(1) 
+    if progress_pct >= 1.0:
+        st.balloons()
+        st.success("Target Volume Achieved! Cultivation Ready for Harvest.")
+        break
+
+    time.sleep(1)
