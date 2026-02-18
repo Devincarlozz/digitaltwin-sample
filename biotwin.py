@@ -2,14 +2,17 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
+import google.generativeai as genai
 from datetime import datetime
+import json
 
-# --- CONFIGURATION ---
-st.set_page_config(
-    page_title="BioTwin: Growth Chamber Digital Twin",
-    page_icon="🧬",
-    layout="wide"
-)
+# --- CONFIGURATION & API SETUP ---
+st.set_page_config(page_title="BioTwin AI: Autonomous Chamber", page_icon="🤖", layout="wide")
+
+# Securely setting the API Key
+GEMINI_API_KEY = "AIzaSyDyPAHpqDJJVrfJi3llWWK644aQnP8ZqlM"
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- SESSION STATE INITIALIZATION ---
 if 'history' not in st.session_state:
@@ -17,138 +20,132 @@ if 'history' not in st.session_state:
         'Timestamp', 'Temperature', 'pH', 'Humidity', 'CO2', 'HealthScore', 'Biomass'
     ])
 if 'current_volume_ml' not in st.session_state:
-    st.session_state.current_volume_ml = 100.0 # Starting at 100ml
+    st.session_state.current_volume_ml = 100.0
+if 'ai_setpoints' not in st.session_state:
+    # Initial safe defaults
+    st.session_state.ai_setpoints = {"target_temp": 25.0, "mixer_speed": 300}
+if 'ai_reasoning' not in st.session_state:
+    st.session_state.ai_reasoning = "System initializing..."
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("🕹️ Chamber Controls")
-target_temp = st.sidebar.slider("Target Temperature (°C)", 15.0, 45.0, 25.0, step=0.5)
-mixer_speed = st.sidebar.slider("Mixer Speed (RPM)", 0, 1000, 300)
+# --- AI AUTONOMOUS CONTROLLER ---
+def ask_gemini_to_control(current_data):
+    """Sends sensor data to Gemini and receives control instructions."""
+    prompt = f"""
+    You are an AI Bio-Chamber Controller. Your goal is to keep microbial growth at 100% health.
+    Current Sensor Data:
+    - Temperature: {current_data['Temperature']}°C
+    - pH: {current_data['pH']}
+    - Humidity: {current_data['Humidity']}%
+    - CO2: {current_data['CO2']} ppm
+    - Current Biomass: {current_data['Biomass']} L
 
-st.sidebar.divider()
-st.sidebar.header("🧫 Cultivation Settings")
-init_vol = st.sidebar.number_input("Initial Inoculum (ml)", value=100)
-target_vol_l = st.sidebar.number_input("Target Harvest (Liters)", value=5.0)
-growth_speed = st.sidebar.select_slider("Growth Multiplier", options=["Slow", "Standard", "Fast"], value="Standard")
-
-# Reset Button
-if st.sidebar.button("Reset Cultivation"):
-    st.session_state.current_volume_ml = float(init_vol)
-    st.session_state.history = pd.DataFrame(columns=['Timestamp', 'Temperature', 'pH', 'Humidity', 'CO2', 'HealthScore', 'Biomass'])
-    st.rerun()
-
-# --- BIOMASS LOGIC ---
-def calculate_growth(current_ml, health_score, speed_setting):
-    # Mapping growth speed to a base multiplier
-    speed_map = {"Slow": 0.001, "Standard": 0.005, "Fast": 0.015}
-    base_rate = speed_map[speed_setting]
+    Optimal Conditions: Temp 28°C, pH 7.0, Mixer 400RPM.
+    If Temp > 30°C, microbes start dying. 
     
-    # Growth is dependent on health score (0.0 to 1.0 multiplier)
-    # If health < 50, growth stalls or declines slightly
-    health_factor = (health_score - 40) / 60 
-    health_factor = max(-0.01, health_factor) # Can have slight decay if very unhealthy
-    
-    # Exponential growth formula: N(t) = N0 * e^(rt)
-    # Simplified for 1-second ticks:
-    new_volume = current_ml * (1 + (base_rate * health_factor))
-    return max(0, new_volume)
+    Respond ONLY in a valid JSON format like this:
+    {{"target_temp": 28.0, "mixer_speed": 400, "reasoning": "Brief explanation of change"}}
+    """
+    try:
+        response = model.generate_content(prompt)
+        # Clean the response to ensure valid JSON
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_json)
+    except Exception as e:
+        return None
 
-# --- SIMULATION ENGINE ---
-def generate_data(target_t, current_vol):
-    temp = target_t + np.random.normal(0, 0.2)
-    ph = 7.0 + np.random.normal(0, 0.05)
-    humidity = 60.0 + np.random.normal(0, 1.5)
-    co2 = 400.0 + np.random.normal(0, 10.0)
+# --- GROWTH SIMULATION ENGINE ---
+def generate_environment(target_temp, current_vol):
+    # Simulate environmental noise/drift
+    drift = np.random.normal(0, 0.5) 
+    temp = target_temp + drift
+    ph = 7.0 + np.random.normal(0, 0.1)
+    hum = 65.0 + np.random.normal(0, 2)
+    co2 = 450.0 + np.random.normal(0, 20)
     
-    # AI Predictive Health Score
-    score = 100.0
-    if temp > 32.0:
-        score -= (temp - 32.0) * 15 
-    elif temp < 18.0:
-        score -= (18.0 - temp) * 5
+    # Calculate Health Score based on deviation from optimal (28°C)
+    score = 100 - (abs(temp - 28.0) * 12)
     score = max(0, min(100, score))
+    
+    # Growth Calculation (Exponential)
+    growth_rate = 0.008 * (score / 100)
+    new_vol = current_vol * (1 + growth_rate)
     
     return {
         'Timestamp': datetime.now().strftime("%H:%M:%S"),
         'Temperature': round(temp, 2),
         'pH': round(ph, 2),
-        'Humidity': round(humidity, 1),
+        'Humidity': round(hum, 1),
         'CO2': round(co2, 0),
         'HealthScore': round(score, 1),
-        'Biomass': round(current_vol / 1000, 3) # Convert to Liters for the chart
-    }
+        'Biomass': round(new_vol / 1000, 3)
+    }, new_vol
 
-# --- MAIN UI ---
-st.title("🌱 BioTwin: Digital Twin & Cultivation Manager")
+# --- UI LAYOUT ---
+st.title("🧪 BioTwin: Gemini-Powered Autonomous Digital Twin")
+st.markdown("This chamber is currently under **Full AI Control**. Manual sliders have been disabled.")
 
-# Top Level Progress Bar
-target_ml = target_vol_l * 1000
-progress_pct = min(1.0, st.session_state.current_volume_ml / target_ml)
-
-st.subheader(f"Total Progress: {round(progress_pct * 100, 1)}%")
+# Top Progress Section
+target_l = 5.0
+progress_pct = min(1.0, (st.session_state.current_volume_ml / 1000) / target_l)
+st.metric("Total Cultivation Progress", f"{round(progress_pct*100, 2)}%")
 st.progress(progress_pct)
 
-# Metrics and UI segments
-metrics_placeholder = st.empty()
-ai_analysis_placeholder = st.empty()
-chart_placeholder = st.empty()
+# Sidebar: AI Monitor
+st.sidebar.header("🤖 AI Controller Status")
+st.sidebar.write(f"**Target Temp:** {st.session_state.ai_setpoints['target_temp']}°C")
+st.sidebar.write(f"**Mixer Speed:** {st.session_state.ai_setpoints['mixer_speed']} RPM")
+st.sidebar.divider()
+st.sidebar.subheader("AI Reasoning:")
+st.sidebar.info(st.session_state.ai_reasoning)
 
-# --- REAL-TIME LOOP ---
-while True:
-    # 1. Logic Update
-    new_data = generate_data(target_temp, st.session_state.current_volume_ml)
-    
-    # Update biomass based on current health
-    st.session_state.current_volume_ml = calculate_growth(
-        st.session_state.current_volume_ml, 
-        new_data['HealthScore'], 
-        growth_speed
+# Placeholders
+metrics_row = st.empty()
+charts_row = st.empty()
+
+# --- MAIN LOOP ---
+count = 0
+while progress_pct < 1.0:
+    # 1. Generate current state based on AI's last setpoints
+    data_point, st.session_state.current_volume_ml = generate_environment(
+        st.session_state.ai_setpoints['target_temp'], 
+        st.session_state.current_volume_ml
     )
     
-    # 2. History Management
-    new_row = pd.DataFrame([new_data])
-    st.session_state.history = pd.concat([st.session_state.history, new_row], ignore_index=True).tail(50)
+    # 2. Update History
+    new_row = pd.DataFrame([data_point])
+    st.session_state.history = pd.concat([st.session_state.history, new_row], ignore_index=True).tail(30)
     
-    # 3. Render Metrics
-    with metrics_placeholder.container():
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Biomass (Liters)", f"{new_data['Biomass']} L", delta=f"{round(st.session_state.current_volume_ml - (new_data['Biomass']*1000), 2)} ml/s")
-        m2.metric("Temp", f"{new_data['Temperature']}°C")
-        m3.metric("pH", f"{new_data['pH']}")
-        m4.metric("CO2", f"{new_data['CO2']} ppm")
+    # 3. AI CONTROL STEP (Every 5 seconds to avoid API spam)
+    if count % 5 == 0:
+        with st.spinner("Gemini analyzing sensor drift..."):
+            ai_command = ask_gemini_to_control(data_point)
+            if ai_command:
+                st.session_state.ai_setpoints['target_temp'] = ai_command.get('target_temp', 28.0)
+                st.session_state.ai_setpoints['mixer_speed'] = ai_command.get('mixer_speed', 400)
+                st.session_state.ai_reasoning = ai_command.get('reasoning', "Maintaining stability.")
 
-    # 4. Render AI Status
-    with ai_analysis_placeholder.container():
-        h_score = new_data['HealthScore']
-        col_a, col_b = st.columns([1, 3])
-        
-        with col_a:
-            st.write("**Growth Status:**")
-            if h_score > 80:
-                st.success("OPTIMAL")
-            elif h_score > 50:
-                st.warning("STRESSED")
-            else:
-                st.error("STAGNANT")
-        
-        with col_b:
-            if h_score < 50:
-                st.error(f"Critical Heat Warning! Growth has halted. Current Score: {h_score}")
-            else:
-                st.info(f"Microbial doubling is active at {growth_speed} rate.")
+    # 4. Update Metrics Display
+    with metrics_row.container():
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Live Temp", f"{data_point['Temperature']}°C", 
+                  delta=f"{round(data_point['Temperature'] - 28.0, 2)} from Optimal")
+        c2.metric("Health Score", f"{data_point['HealthScore']}%")
+        c3.metric("Biomass", f"{data_point['Biomass']} L")
+        c4.metric("AI Stability", "ACTIVE", delta_color="normal")
 
-    # 5. Render Charts
-    with chart_placeholder.container():
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("Biomass Accumulation (L)")
+    # 5. Update Charts
+    with charts_row.container():
+        col_left, col_right = st.columns(2)
+        with col_left:
+            st.write("### Real-time Growth (L)")
             st.line_chart(st.session_state.history.set_index('Timestamp')[['Biomass']])
-        with c2:
-            st.write("Environment Stability")
+        with col_right:
+            st.write("### AI Corrective Action (Temp vs Health)")
             st.line_chart(st.session_state.history.set_index('Timestamp')[['Temperature', 'HealthScore']])
 
-    if progress_pct >= 1.0:
-        st.balloons()
-        st.success("Target Volume Achieved! Cultivation Ready for Harvest.")
-        break
-
+    count += 1
     time.sleep(1)
+
+if progress_pct >= 1.0:
+    st.balloons()
+    st.success("Target achieved! Gemini successfully managed the cultivation process.")
