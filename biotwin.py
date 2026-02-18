@@ -8,7 +8,7 @@ import json
 
 # --- CONFIGURATION & API SETUP ---
 st.set_page_config(page_title="BioTwin AI: Autonomous Chamber", page_icon="🤖", layout="wide")
-
+GEMINI_API_KEY = st.secrets["AIzaSyDyPAHpqDJJVrfJi3llWWK644aQnP8ZqlM"]
 # Securely setting the API Key
 GEMINI_API_KEY = "AIzaSyDyPAHpqDJJVrfJi3llWWK644aQnP8ZqlM"
 genai.configure(api_key=GEMINI_API_KEY)
